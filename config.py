@@ -4,9 +4,11 @@ config.py — Configuración centralizada para el bot CESS.
 Todas las variables de entorno se validan aquí al arranque.
 Si falta una variable crítica, el proceso falla rápido con un mensaje claro.
 """
+from __future__ import annotations
 
 import os
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,7 @@ META_TOKEN: str = os.environ["META_TOKEN"]
 PHONE_NUMBER_ID: str = os.environ["PHONE_NUMBER_ID"]
 VERIFY_TOKEN: str = os.environ.get("VERIFY_TOKEN", "vibecode")
 NUMERO_ASESOR: str = os.environ["NUMERO_ASESOR"]
-APP_SECRET: str | None = os.environ.get("APP_SECRET")  # Opcional — habilita validación HMAC
+APP_SECRET: Optional[str] = os.environ.get("APP_SECRET")
 API_VERSION: str = os.environ.get("META_API_VERSION", "v25.0")
 
 # ── OpenAI ───────────────────────────────────────────────────────────────────
@@ -27,12 +29,10 @@ VENTANA_HISTORIAL: int = int(os.environ.get("VENTANA_HISTORIAL", "10"))
 MAX_GUARDADOS_POR_NUMERO: int = int(os.environ.get("MAX_GUARDADOS_POR_NUMERO", "30"))
 
 # ── Base de datos ─────────────────────────────────────────────────────────────
-# En Render: DATABASE_URL apunta a PostgreSQL.
-# En tests locales: fallback a SQLite en memoria o ruta temporal.
-DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
+DATABASE_URL: Optional[str] = os.environ.get("DATABASE_URL")
 
 # ── Mensajes de respaldo ──────────────────────────────────────────────────────
-MENSAJES_RESPALDO: dict[str, str] = {
+MENSAJES_RESPALDO = {
     "listo_para_inscribir": (
         "¡Perfecto! Para continuar con tu inscripción, comunícate al número 6144150015 "
         'con el mensaje "estoy listo para la inscripcion" o haz clic en el siguiente '
@@ -43,8 +43,15 @@ MENSAJES_RESPALDO: dict[str, str] = {
 }
 MENSAJE_RESPALDO_GENERICO: str = "En un momento te atiende un asesor 🙂"
 
+# ── Etiquetas de traspaso (usadas en app.py y tests) ─────────────────────────
+_ETIQUETAS_TRASPASO_LABELS = {
+    "listo_para_inscribir": "🔥 LISTO PARA INSCRIBIR",
+    "duda_sin_resolver": "❓ DUDA SIN RESOLVER",
+    "tramite_administrativo": "🗂 TRÁMITE ADMINISTRATIVO",
+}
+
 # ── Tool definitions (OpenAI) ────────────────────────────────────────────────
-TOOLS_TRASPASO: list[dict] = [
+TOOLS_TRASPASO = [
     {
         "type": "function",
         "name": "notificar_traspaso",
@@ -74,15 +81,9 @@ TOOLS_TRASPASO: list[dict] = [
     }
 ]
 
-# ── Etiquetas de traspaso (usadas en app.py y tests) ────────────────────────
-_ETIQUETAS_TRASPASO_LABELS: dict[str, str] = {
-    "listo_para_inscribir": "🔥 LISTO PARA INSCRIBIR",
-    "duda_sin_resolver": "❓ DUDA SIN RESOLVER",
-    "tramite_administrativo": "🗂 TRÁMITE ADMINISTRATIVO",
-}
-
 # ── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()
+
 
 def configurar_logging() -> None:
     """Configura el logging estructurado para producción."""
@@ -91,6 +92,7 @@ def configurar_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+
 
 # ── Validación al importar ────────────────────────────────────────────────────
 def _validar_config() -> None:
@@ -104,8 +106,8 @@ def _validar_config() -> None:
     faltantes = [k for k, v in required.items() if not v]
     if faltantes:
         raise EnvironmentError(
-            f"Variables de entorno faltantes: {', '.join(faltantes)}. "
-            "Configúralas en el panel de Render → Environment."
+            "Variables de entorno faltantes: {}. "
+            "Configúralas en el panel de Render → Environment.".format(", ".join(faltantes))
         )
     if not APP_SECRET:
         logger.warning(

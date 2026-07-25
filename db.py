@@ -2,23 +2,20 @@
 db.py — Capa de acceso a datos para el historial de conversaciones.
 
 En producción (Render): usa PostgreSQL via DATABASE_URL.
-En tests locales: usa SQLite en memoria si DATABASE_URL no está configurado.
-
-Expone una interfaz única independiente del motor subyacente.
+En tests locales: usa SQLite si DATABASE_URL no está configurado.
 """
+from __future__ import annotations
 
 import logging
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Generator
+from typing import Generator, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Detectamos el motor disponible
-_DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
+_DATABASE_URL: Optional[str] = os.environ.get("DATABASE_URL")
 
-# psycopg2 solo se importa si está disponible y hay DATABASE_URL configurado
 _USE_POSTGRES: bool = False
 
 if _DATABASE_URL:
@@ -35,15 +32,13 @@ if _DATABASE_URL:
 
 if not _USE_POSTGRES:
     import sqlite3
-    _SQLITE_PATH: str = os.environ.get("HISTORIAL_DB_PATH", ":memory:")
+    _SQLITE_PATH: str = os.environ.get("HISTORIAL_DB_PATH", "historial_cess.db")
     logger.info("Motor de base de datos: SQLite (%s)", _SQLITE_PATH)
 
 
-# ── Connection context managers ───────────────────────────────────────────────
-
 @contextmanager
 def _pg_connection() -> Generator:
-    """Obtiene una conexión PostgreSQL del pool."""
+    """Obtiene una conexión PostgreSQL."""
     conn = psycopg2.connect(_DATABASE_URL)
     try:
         yield conn
@@ -71,11 +66,8 @@ def _sqlite_connection() -> Generator:
 
 
 def _connection():
-    """Retorna el context manager correcto según el motor configurado."""
     return _pg_connection() if _USE_POSTGRES else _sqlite_connection()
 
-
-# ── Schema ────────────────────────────────────────────────────────────────────
 
 _CREATE_TABLE_PG = """
     CREATE TABLE IF NOT EXISTS historial (
@@ -105,7 +97,6 @@ def inicializar_db() -> None:
     sql = _CREATE_TABLE_PG if _USE_POSTGRES else _CREATE_TABLE_SQLITE
     with _connection() as conn:
         cur = conn.cursor()
-        # PostgreSQL admite múltiples statements; para SQLite hay que dividir
         if _USE_POSTGRES:
             cur.execute(sql)
         else:
@@ -115,8 +106,6 @@ def inicializar_db() -> None:
                     cur.execute(stmt)
     logger.info("Base de datos inicializada correctamente.")
 
-
-# ── CRUD ──────────────────────────────────────────────────────────────────────
 
 def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:
     """Persiste un mensaje en el historial."""
@@ -128,12 +117,12 @@ def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:
         conn.cursor().execute(sql, (numero, rol, contenido, ahora))
 
 
-def obtener_historial(numero: str, limite: int | None = None) -> list[dict]:
+def obtener_historial(numero: str, limite: Optional[int] = None) -> List[dict]:
     """
-    Devuelve los últimos `limite` mensajes del número, en orden cronológico,
+    Devuelve los últimos `limite` mensajes del número en orden cronológico,
     listos para pasarse como `input` a la OpenAI Responses API.
     """
-    from config import VENTANA_HISTORIAL  # evitar importación circular al nivel módulo
+    from config import VENTANA_HISTORIAL
     if limite is None:
         limite = VENTANA_HISTORIAL
 
@@ -149,15 +138,12 @@ def obtener_historial(numero: str, limite: int | None = None) -> list[dict]:
         cur.execute(sql, (numero, limite))
         filas = cur.fetchall()
 
-    filas = list(reversed(filas))  # más viejo → más nuevo
+    filas = list(reversed(filas))
     return [{"role": f[0], "content": f[1]} for f in filas]
 
 
 def limpiar_historial_antiguo(numero: str) -> None:
-    """
-    Elimina registros viejos dejando solo los últimos MAX_GUARDADOS_POR_NUMERO
-    mensajes del número. Evita crecimiento ilimitado de la tabla.
-    """
+    """Elimina registros viejos dejando solo los últimos MAX_GUARDADOS_POR_NUMERO."""
     from config import MAX_GUARDADOS_POR_NUMERO
 
     if _USE_POSTGRES:

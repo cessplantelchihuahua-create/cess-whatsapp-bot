@@ -1,18 +1,16 @@
 """
 context_loader.py — Carga el contexto privado del asistente CESS.
-
-Busca datosCESS.txt relativo a este archivo (funciona en cualquier CWD).
-Permite override completo via variable de entorno CONTEXTO_PRIVADO
-(útil para tests sin tocar el filesystem).
 """
+from __future__ import annotations
 
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_OVERRIDE: str | None = os.environ.get("CONTEXTO_PRIVADO")
+_OVERRIDE: Optional[str] = os.environ.get("CONTEXTO_PRIVADO")
 
 if _OVERRIDE is not None:
     _contexto: str = _OVERRIDE

@@ -1,18 +1,13 @@
 """
 ai_client.py — Wrapper para la OpenAI Responses API.
-
-Características:
-- Construye el prompt de sistema con el contexto de CESS.
-- Maneja output_text None y tool calls de traspaso.
-- Retorna una estructura normalizada para que app.py no tenga lógica de IA.
-- Logging estructurado de tokens y duración.
 """
+from __future__ import annotations
 
 import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 
 from openai import OpenAI, APIError, APITimeoutError, RateLimitError
 
@@ -28,12 +23,6 @@ from context_loader import get_contexto
 logger = logging.getLogger(__name__)
 
 _client = OpenAI(api_key=OPENAI_API_KEY)
-
-_ETIQUETAS_TRASPASO: dict[str, str] = {
-    "listo_para_inscribir": "🔥 LISTO PARA INSCRIBIR",
-    "duda_sin_resolver": "❓ DUDA SIN RESOLVER",
-    "tramite_administrativo": "🗂 TRÁMITE ADMINISTRATIVO",
-}
 
 _INSTRUCCION_INSCRIPCION = (
     "Para continuar con tu inscripción, comunícate al número 6144150015 "
@@ -60,32 +49,24 @@ def _construir_instrucciones(ad_context: str = "") -> str:
         "REGLA CRÍTICA: Si la respuesta no se encuentra explícitamente en el contexto, "
         "sigue las reglas de escalamiento definidas en el contexto (mensaje de escalación + "
         "llamada a la función notificar_traspaso). No inventes ni asumas información.\n\n"
-        f"Contexto:\n{contexto}"
+        "Contexto:\n{}".format(contexto)
     )
     if ad_context:
         base += (
-            f"\n\nContexto de origen del anuncio:\n{ad_context}\n"
+            "\n\nContexto de origen del anuncio:\n{}\n"
             "IMPORTANTE: Saluda amigablemente haciendo alusión al anuncio de forma natural "
             "y prioriza la información del contexto privado relacionada con el tema del anuncio."
-        )
+        ).format(ad_context)
     return base
 
 
 def procesar_mensaje(
-    historial: list[dict],
+    historial: List[dict],
     texto_usuario: str,
     ad_context: str = "",
 ) -> RespuestaIA:
     """
     Llama a la OpenAI Responses API y retorna un RespuestaIA normalizado.
-
-    Args:
-        historial: Lista de mensajes previos [{role, content}, …].
-        texto_usuario: Mensaje actual del usuario.
-        ad_context: Contexto de anuncio de Facebook (puede estar vacío).
-
-    Returns:
-        RespuestaIA con el texto final y datos de traspaso si aplica.
     """
     instrucciones = _construir_instrucciones(ad_context)
     entrada = historial + [{"role": "user", "content": texto_usuario}]
@@ -107,11 +88,13 @@ def procesar_mensaje(
     except APIError as exc:
         logger.error("OpenAI APIError: %s", exc)
         return RespuestaIA(texto=MENSAJE_RESPALDO_GENERICO)
+    except Exception as exc:
+        logger.error("Error inesperado en OpenAI: %s", exc)
+        return RespuestaIA(texto=MENSAJE_RESPALDO_GENERICO)
 
     elapsed = time.perf_counter() - t0
     logger.info("OpenAI respondió en %.2fs", elapsed)
 
-    # ── Extraer texto y function calls ─────────────────────────────────────
     respuesta_texto: str = response.output_text or ""
     tipo_traspaso: Optional[str] = None
     datos_traspaso: dict = {}
@@ -124,13 +107,10 @@ def procesar_mensaje(
                 datos_traspaso = {}
             tipo_traspaso = datos_traspaso.get("tipo")
             logger.info("Traspaso detectado: tipo=%s", tipo_traspaso)
-            break  # Solo procesamos el primer traspaso
+            break
 
-    # ── Texto de respaldo si la IA no generó texto ─────────────────────────
     if not respuesta_texto:
         respuesta_texto = MENSAJES_RESPALDO.get(tipo_traspaso or "", MENSAJE_RESPALDO_GENERICO)
-
-    # ── Asegurar info de contacto en traspasos de inscripción ──────────────
     elif tipo_traspaso == "listo_para_inscribir":
         if "6144150015" not in respuesta_texto and "614 415 0015" not in respuesta_texto:
             respuesta_texto = respuesta_texto.strip() + "\n\n" + _INSTRUCCION_INSCRIPCION

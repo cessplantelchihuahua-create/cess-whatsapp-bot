@@ -3,14 +3,16 @@ app.py — Bot WhatsApp CESS · Producción en Render
 
 Entry point Flask. Contiene SOLO las rutas HTTP.
 Toda la lógica de negocio está en los módulos:
-  config.py        — variables de entorno y constantes
-  db.py            — historial en PostgreSQL (o SQLite en tests)
-  ai_client.py     — wrapper OpenAI Responses API
-  meta_client.py   — wrapper Meta WhatsApp API con retry + HMAC
+  config.py         — variables de entorno y constantes
+  db.py             — historial en PostgreSQL (o SQLite)
+  ai_client.py      — wrapper OpenAI Responses API
+  meta_client.py    — wrapper Meta WhatsApp API con retry + HMAC
   context_loader.py — carga datosCESS.txt
 """
+from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from flask import Flask, request, jsonify
 
@@ -41,10 +43,7 @@ def health_check():
 
 @app.route("/webhook", methods=["GET"])
 def verificar_webhook():
-    """
-    Verificación de webhook de Meta.
-    Meta llama a este endpoint con hub.mode=subscribe cuando configuras el webhook.
-    """
+    """Verificación de webhook de Meta."""
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
@@ -63,15 +62,8 @@ def verificar_webhook():
 def recibir_mensaje():
     """
     Recibe eventos de Meta WhatsApp Business API.
-
-    Flujo:
-    1. Valida firma HMAC (si APP_SECRET está configurado).
-    2. Extrae mensajes de texto del payload.
-    3. Consulta historial, llama a la IA, envía respuesta.
-    4. Notifica al asesor si hay traspaso.
-    5. Retorna 200 inmediatamente (Meta reenvía si tarda > 20s).
+    Retorna 200 inmediatamente (Meta reenvía si tarda > 20s).
     """
-    # 1. Validar firma HMAC
     raw_body = request.get_data()
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not validar_firma_meta(raw_body, signature):
@@ -82,14 +74,13 @@ def recibir_mensaje():
 
     try:
         _procesar_payload(data)
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         logger.exception("Error inesperado procesando payload de Meta: %s", exc)
 
-    # Meta exige 200 inmediato — el procesamiento ya ocurrió de forma síncrona
     return jsonify({"status": "ok"}), 200
 
 
-# ── Business Logic (internal) ─────────────────────────────────────────────────
+# ── Business Logic ────────────────────────────────────────────────────────────
 
 def _procesar_payload(data: dict) -> None:
     """Itera sobre el payload de Meta y procesa cada mensaje de texto."""
@@ -97,11 +88,9 @@ def _procesar_payload(data: dict) -> None:
         for change in entry.get("changes", []):
             value = change.get("value", {})
 
-            # Ignorar eventos que no sean mensajes WhatsApp
             if change.get("field") != "messages" or value.get("messaging_product") != "whatsapp":
                 continue
 
-            # Extraer contexto del cambio
             contacts = value.get("contacts", [])
             nombre_usuario = contacts[0].get("profile", {}).get("name", "Usuario") if contacts else "Usuario"
             phone_number_id = value.get("metadata", {}).get("phone_number_id")
@@ -113,17 +102,15 @@ def _procesar_payload(data: dict) -> None:
 def _procesar_mensaje_individual(
     message: dict,
     nombre_usuario: str,
-    phone_number_id: str | None,
+    phone_number_id: Optional[str],
 ) -> None:
     """Procesa un único mensaje entrante de WhatsApp."""
     numero_usuario: str = message.get("from", "")
 
-    # Solo procesamos mensajes de tipo texto
-    texto_usuario: str | None = None
+    texto_usuario: Optional[str] = None
     if message.get("type") == "text":
         texto_usuario = message.get("text", {}).get("body")
 
-    # Contexto de anuncio (Click-to-WhatsApp)
     ad_context = ""
     referral = message.get("referral")
     if referral:
@@ -131,27 +118,23 @@ def _procesar_mensaje_individual(
         body = referral.get("body", "")
         source_id = referral.get("source_id", "")
         ad_context = (
-            f"\n[El usuario hizo clic en el anuncio de Facebook: "
-            f"'{headline}' - '{body}' (ID: {source_id})]"
-        )
+            "\n[El usuario hizo clic en el anuncio de Facebook: "
+            "'{}' - '{}' (ID: {})]"
+        ).format(headline, body, source_id)
         if not texto_usuario:
-            texto_usuario = f"Hola, me interesa el anuncio: {headline}"
+            texto_usuario = "Hola, me interesa el anuncio: {}".format(headline)
 
     if not texto_usuario:
-        return  # Ignorar mensajes sin texto (imágenes, stickers, etc.)
+        return
 
     logger.info("📩 %s (%s): %s", nombre_usuario, numero_usuario, texto_usuario[:80])
 
-    # Obtener historial previo
     historial = obtener_historial(numero_usuario)
-
-    # Llamar a la IA
     resultado = procesar_mensaje(historial, texto_usuario, ad_context)
 
-    # Notificar al asesor si hay traspaso
     if resultado.hay_traspaso:
         etiqueta = _ETIQUETAS_TRASPASO_LABELS.get(
-            resultado.tipo_traspaso, resultado.tipo_traspaso or "TRASPASO"
+            resultado.tipo_traspaso or "", "TRASPASO"
         )
         aviso = armar_notificacion_traspaso(
             etiqueta=etiqueta,
@@ -162,19 +145,14 @@ def _procesar_mensaje_individual(
         )
         enviar_whatsapp(NUMERO_ASESOR, aviso, phone_number_id)
 
-    # Enviar respuesta al usuario
     enviado = enviar_whatsapp(numero_usuario, resultado.texto, phone_number_id)
     if enviado:
         logger.info("🤖 Respuesta enviada a %s: %s", numero_usuario, resultado.texto[:80])
 
-    # Guardar turno en historial
     guardar_mensaje(numero_usuario, "user", texto_usuario)
     guardar_mensaje(numero_usuario, "assistant", resultado.texto)
     limpiar_historial_antiguo(numero_usuario)
 
 
-# ── Entry point (desarrollo/Gunicorn) ─────────────────────────────────────────
 if __name__ == "__main__":
-    # Solo para desarrollo local con `python app.py`
-    # En Render: gunicorn app:app (via Procfile)
     app.run(host="0.0.0.0", port=5000, debug=False)
