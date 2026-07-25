@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: cess-whatsapp-bot
+    env: python
+    region: oregon   # Cambia a 'frankfurt' si prefieres EU
+    plan: starter    # Cambia a 'free' para tier gratuito (puede tener cold starts)
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --timeout 60 --bind 0.0.0.0:$PORT
+    healthCheckPath: /
+    envVars:
+      # ── Meta / WhatsApp ──────────────────────────────────
+      - key: META_TOKEN
+        sync: false           # Ingresa manualmente en el panel de Render
+      - key: PHONE_NUMBER_ID
+        sync: false
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: NUMERO_ASESOR
+        sync: false
+      - key: APP_SECRET
+        sync: false           # Meta → Tu App → Settings → Basic → App Secret
+      # ── OpenAI ───────────────────────────────────────────
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      # ── Base de datos ─────────────────────────────────────
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cess-db       # Nombre del Postgres addon en Render
+          property: connectionString
+      # ── Bot config ────────────────────────────────────────
+      - key: VENTANA_HISTORIAL
+        value: "10"
+      - key: MAX_GUARDADOS_POR_NUMERO
+        value: "30"
+      - key: LOG_LEVEL
+        value: INFO
+
+databases:
+  - name: cess-db
+    plan: free               # PostgreSQL gratuito en Render (90 días; después $7/mes)
+    region: oregon
