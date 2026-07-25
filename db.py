@@ -78,6 +78,11 @@ _CREATE_TABLE_PG = """
         creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_historial_numero ON historial(numero);
+
+    CREATE TABLE IF NOT EXISTS wamids_procesados (
+        wamid TEXT PRIMARY KEY,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 """
 
 _CREATE_TABLE_SQLITE = """
@@ -89,6 +94,11 @@ _CREATE_TABLE_SQLITE = """
         creado_en TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_historial_numero ON historial(numero);
+
+    CREATE TABLE IF NOT EXISTS wamids_procesados (
+        wamid TEXT PRIMARY KEY,
+        creado_en TEXT NOT NULL
+    );
 """
 
 
@@ -105,6 +115,33 @@ def inicializar_db() -> None:
                 if stmt:
                     cur.execute(stmt)
     logger.info("Base de datos inicializada correctamente.")
+
+
+def es_wamid_procesado(wamid: str) -> bool:
+    """Retorna True si el mensaje con ese ID (wamid) ya fue procesado."""
+    if not wamid:
+        return False
+    sql = "SELECT 1 FROM wamids_procesados WHERE wamid = %s"
+    if not _USE_POSTGRES:
+        sql = sql.replace("%s", "?")
+    with _connection() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (wamid,))
+        row = cur.fetchone()
+        return row is not None
+
+
+def registrar_wamid(wamid: str) -> None:
+    """Registra el wamid en la tabla de deduplicación."""
+    if not wamid:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    sql = "INSERT INTO wamids_procesados (wamid, creado_en) VALUES (%s, %s) ON CONFLICT DO NOTHING"
+    if not _USE_POSTGRES:
+        sql = "INSERT OR IGNORE INTO wamids_procesados (wamid, creado_en) VALUES (?, ?)"
+    with _connection() as conn:
+        conn.cursor().execute(sql, (wamid, ahora))
+
 
 
 def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:

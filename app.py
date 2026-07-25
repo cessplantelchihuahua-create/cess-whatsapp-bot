@@ -4,7 +4,7 @@ app.py — Bot WhatsApp CESS · Producción en Render
 Entry point Flask. Contiene SOLO las rutas HTTP.
 Toda la lógica de negocio está en los módulos:
   config.py         — variables de entorno y constantes
-  db.py             — historial en PostgreSQL (o SQLite)
+  db.py             — historial y deduplicación en PostgreSQL (o SQLite)
   ai_client.py      — wrapper OpenAI Responses API
   meta_client.py    — wrapper Meta WhatsApp API con retry + HMAC
   context_loader.py — carga datosCESS.txt
@@ -18,7 +18,14 @@ from flask import Flask, request, jsonify
 
 import config  # noqa: F401 — dispara validación al arranque
 from config import VERIFY_TOKEN, NUMERO_ASESOR, _ETIQUETAS_TRASPASO_LABELS
-from db import inicializar_db, guardar_mensaje, obtener_historial, limpiar_historial_antiguo
+from db import (
+    inicializar_db,
+    guardar_mensaje,
+    obtener_historial,
+    limpiar_historial_antiguo,
+    es_wamid_procesado,
+    registrar_wamid,
+)
 from ai_client import procesar_mensaje
 from meta_client import validar_firma_meta, enviar_whatsapp, armar_notificacion_traspaso
 
@@ -31,6 +38,11 @@ app = Flask(__name__)
 
 # Inicializar DB al arrancar (idempotente)
 inicializar_db()
+
+_MENSAJE_NO_TEXTO = (
+    "Por el momento solo puedo leer mensajes de texto. Si tienes alguna duda sobre "
+    "nuestros programas, costos o inscripciones, ¡escríbemela por aquí y con gusto te ayudo! 🙂"
+)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -62,7 +74,7 @@ def verificar_webhook():
 def recibir_mensaje():
     """
     Recibe eventos de Meta WhatsApp Business API.
-    Retorna 200 inmediatamente (Meta reenvía si tarda > 20s).
+    Retorna 200 OK inmediatamente a Meta para cumplir con el timeout de 20s.
     """
     raw_body = request.get_data()
     signature = request.headers.get("X-Hub-Signature-256", "")
@@ -83,7 +95,7 @@ def recibir_mensaje():
 # ── Business Logic ────────────────────────────────────────────────────────────
 
 def _procesar_payload(data: dict) -> None:
-    """Itera sobre el payload de Meta y procesa cada mensaje de texto."""
+    """Itera sobre el payload de Meta y procesa cada mensaje aisladamente."""
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
@@ -96,7 +108,10 @@ def _procesar_payload(data: dict) -> None:
             phone_number_id = value.get("metadata", {}).get("phone_number_id")
 
             for message in value.get("messages", []):
-                _procesar_mensaje_individual(message, nombre_usuario, phone_number_id)
+                try:
+                    _procesar_mensaje_individual(message, nombre_usuario, phone_number_id)
+                except Exception as exc:
+                    logger.exception("Error procesando mensaje individual %s: %s", message.get("id"), exc)
 
 
 def _procesar_mensaje_individual(
@@ -104,12 +119,29 @@ def _procesar_mensaje_individual(
     nombre_usuario: str,
     phone_number_id: Optional[str],
 ) -> None:
-    """Procesa un único mensaje entrante de WhatsApp."""
+    """Procesa un único mensaje entrante de WhatsApp con deduplicación y soporte multimedia."""
     numero_usuario: str = message.get("from", "")
+    wamid: str = message.get("id", "")
 
+    # 1. Deduplicación por wamid
+    if wamid and es_wamid_procesado(wamid):
+        logger.info("🔁 Mensaje duplicado omitido (wamid: %s)", wamid)
+        return
+
+    # Registrar el wamid para prevenir procesamiento duplicado concurrente/posterior
+    if wamid:
+        registrar_wamid(wamid)
+
+    # 2. Manejo de tipos de mensaje
+    msg_type = message.get("type")
     texto_usuario: Optional[str] = None
-    if message.get("type") == "text":
+
+    if msg_type == "text":
         texto_usuario = message.get("text", {}).get("body")
+    elif msg_type in ("audio", "image", "document", "video", "sticker", "voice", "location"):
+        logger.info("📎 Mensaje no-texto recibido (%s) de %s", msg_type, numero_usuario)
+        enviar_whatsapp(numero_usuario, _MENSAJE_NO_TEXTO, phone_number_id)
+        return
 
     ad_context = ""
     referral = message.get("referral")

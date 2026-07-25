@@ -170,10 +170,10 @@ class TestWebhookPost:
 
         assert errores == 0, f"Hubo {errores} errores en 50 peticiones"
 
-    def test_mensaje_no_texto_ignorado(self, client, mocker):
-        """Un mensaje de tipo imagen/audio debe ignorarse sin error."""
+    def test_mensaje_no_texto_envia_aviso(self, client, mocker):
+        """Un mensaje de tipo imagen/audio debe enviar aviso amable al usuario sin llamar a OpenAI."""
         mock_create = mocker.patch("ai_client._client.responses.create")
-        mocker.patch("meta_client.requests.post", return_value=mocker.MagicMock(status_code=200))
+        mock_post = mocker.patch("meta_client.requests.post", return_value=mocker.MagicMock(status_code=200))
 
         payload = {
             "object": "whatsapp_business_account",
@@ -186,7 +186,7 @@ class TestWebhookPost:
                         "contacts": [{"profile": {"name": "User"}, "wa_id": "526141234567"}],
                         "messages": [{
                             "from": "526141234567",
-                            "id": "wamid.img123",
+                            "id": "wamid.img123_unique",
                             "timestamp": "1750275992",
                             "type": "image",  # No es texto
                             "image": {"id": "img_id"}
@@ -200,6 +200,27 @@ class TestWebhookPost:
         assert resp.status_code == 200
         # No debe haberse llamado a OpenAI
         mock_create.assert_not_called()
+        # Debe haberse llamado a Meta para notificar al usuario que solo leemos texto
+        assert mock_post.called
+
+    def test_mensaje_duplicado_omitido(self, client, mocker, meta_payload_texto):
+        """Un segundo envío del mismo mensaje (mismo wamid) no debe llamar a OpenAI dos veces."""
+        mock_create = mocker.patch("ai_client._client.responses.create", return_value=mocker.MagicMock(
+            output_text="Respuesta.", output=[]
+        ))
+        mocker.patch("meta_client.requests.post", return_value=mocker.MagicMock(status_code=200))
+
+        # Primer envío
+        res1 = _post_webhook(client, meta_payload_texto)
+        assert res1.status_code == 200
+        assert mock_create.call_count == 1
+
+        # Segundo envío con el mismo wamid
+        res2 = _post_webhook(client, meta_payload_texto)
+        assert res2.status_code == 200
+        # OpenAI NO debió ser llamado una segunda vez
+        assert mock_create.call_count == 1
+
 
     def test_payload_campo_incorrecto_ignorado(self, client, mocker):
         """Un cambio con field distinto de 'messages' debe ignorarse."""

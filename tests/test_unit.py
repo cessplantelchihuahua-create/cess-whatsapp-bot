@@ -128,6 +128,18 @@ class TestDatabase:
         db.inicializar_db()
         db.inicializar_db()  # Segunda llamada — no debe fallar
 
+    def test_deduplicacion_wamid(self):
+        """Un wamid registrado debe retornar True en es_wamid_procesado."""
+        import db
+        wamid = "wamid.test_unique_123"
+        assert db.es_wamid_procesado(wamid) is False
+        db.registrar_wamid(wamid)
+        assert db.es_wamid_procesado(wamid) is True
+        # Registrar de nuevo (ON CONFLICT IGNORE) no debe fallar
+        db.registrar_wamid(wamid)
+        assert db.es_wamid_procesado(wamid) is True
+
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # CONTEXT LOADER
