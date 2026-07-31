@@ -13,15 +13,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Meta / WhatsApp ──────────────────────────────────────────────────────────
-META_TOKEN: str = os.environ["META_TOKEN"]
-PHONE_NUMBER_ID: str = os.environ["PHONE_NUMBER_ID"]
+META_TOKEN: str = os.environ.get("META_TOKEN", "")
+PHONE_NUMBER_ID: str = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN: str = os.environ.get("VERIFY_TOKEN", "vibecode")
-NUMERO_ASESOR: str = os.environ["NUMERO_ASESOR"]
+NUMERO_ASESOR: str = os.environ.get("NUMERO_ASESOR", "")
 APP_SECRET: Optional[str] = os.environ.get("APP_SECRET")
 API_VERSION: str = os.environ.get("META_API_VERSION", "v25.0")
 
 # ── OpenAI ───────────────────────────────────────────────────────────────────
-OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
+OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 # ── Historial ────────────────────────────────────────────────────────────────
@@ -105,9 +105,10 @@ def _validar_config() -> None:
     }
     faltantes = [k for k, v in required.items() if not v]
     if faltantes:
-        raise EnvironmentError(
-            "Variables de entorno faltantes: {}. "
-            "Configúralas en el panel de Render → Environment.".format(", ".join(faltantes))
+        logger.error(
+            "❌ ERROR DE CONFIGURACIÓN: Variables de entorno faltantes: %s. "
+            "El bot no funcionará hasta que las agregues en el panel de Render → Environment.",
+            ", ".join(faltantes)
         )
     if not APP_SECRET:
         logger.warning(

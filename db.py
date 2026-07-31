@@ -65,8 +65,17 @@ def _sqlite_connection() -> Generator:
         conn.close()
 
 
-def _connection():
+_DB_INICIALIZADA = False
+_ULTIMO_DB_TARGET = None
+
+
+def _connection_raw():
     return _pg_connection() if _USE_POSTGRES else _sqlite_connection()
+
+
+def _connection():
+    inicializar_db()  # Reintenta si no se pudo inicializar en el arranque o falló
+    return _connection_raw()
 
 
 _CREATE_TABLE_PG = """
@@ -104,17 +113,29 @@ _CREATE_TABLE_SQLITE = """
 
 def inicializar_db() -> None:
     """Crea las tablas si no existen. Idempotente."""
+    global _DB_INICIALIZADA, _ULTIMO_DB_TARGET
+    db_target = _DATABASE_URL if _USE_POSTGRES else _SQLITE_PATH
+    if _DB_INICIALIZADA and _ULTIMO_DB_TARGET == db_target:
+        return
     sql = _CREATE_TABLE_PG if _USE_POSTGRES else _CREATE_TABLE_SQLITE
-    with _connection() as conn:
-        cur = conn.cursor()
-        if _USE_POSTGRES:
-            cur.execute(sql)
-        else:
-            for stmt in sql.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    cur.execute(stmt)
-    logger.info("Base de datos inicializada correctamente.")
+    try:
+        with _connection_raw() as conn:
+            cur = conn.cursor()
+            if _USE_POSTGRES:
+                cur.execute(sql)
+            else:
+                for stmt in sql.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        cur.execute(stmt)
+        _DB_INICIALIZADA = True
+        _ULTIMO_DB_TARGET = db_target
+        logger.info("Base de datos inicializada correctamente.")
+    except Exception as exc:
+        logger.error(
+            "⚠️ Error inicializando la base de datos (se reintentará bajo demanda): %s",
+            exc
+        )
 
 
 def es_wamid_procesado(wamid: str) -> bool:
