@@ -12,7 +12,9 @@ Toda la lógica de negocio está en los módulos:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
+from time import sleep
 
 from flask import Flask, request, jsonify
 
@@ -30,6 +32,9 @@ from db import (
     conversacion_en_manos_admin,
     marcar_conversacion_admin_activa,
     marcar_conversacion_admin_inactiva,
+    agregar_mensaje_sin_procesar,
+    obtener_mensajes_sin_procesar,
+    limpiar_mensajes_sin_procesar,
 )
 from ai_client import procesar_mensaje
 from meta_client import validar_firma_meta, enviar_whatsapp, armar_notificacion_traspaso
@@ -48,6 +53,11 @@ _MENSAJE_NO_TEXTO = (
     "Por el momento solo puedo leer mensajes de texto. Si tienes alguna duda sobre "
     "nuestros programas, costos o inscripciones, ¡escríbemela por aquí y con gusto te ayudo! 🙂"
 )
+
+# ── Control de síntesis de mensajes ─────────────────────────────────────[...]
+# Diccionario de timers activos por usuario para agrupar mensajes
+_mensaje_timers: dict[str, threading.Timer] = {}
+_VENTANA_AGRUPACION = 5  # segundos para agrupar mensajes del mismo usuario
 
 
 # ── Routes ─────────────────────────────────────────────────────────────[...]
@@ -202,32 +212,110 @@ def _procesar_mensaje_individual(
 
     logger.info("📩 %s (%s): %s", nombre_usuario, numero_usuario, texto_usuario[:80])
 
-    historial = obtener_historial(numero_usuario)
-    resultado = procesar_mensaje(historial, texto_usuario, ad_context)
+    # 4. Agregar mensaje a la cola de síntesis y programar procesamiento
+    agregar_mensaje_sin_procesar(numero_usuario, texto_usuario)
+    _reprogramar_procesamiento_sintetizado(numero_usuario, nombre_usuario, phone_number_id)
 
-    if resultado.hay_traspaso:
-        etiqueta = _ETIQUETAS_TRASPASO_LABELS.get(
-            resultado.tipo_traspaso or "", "TRASPASO"
-        )
-        aviso = armar_notificacion_traspaso(
-            etiqueta=etiqueta,
-            nombre_usuario=nombre_usuario,
-            numero_usuario=numero_usuario,
-            programa=resultado.datos_traspaso.get("programa", "N/A"),
-            resumen=resultado.datos_traspaso.get("resumen", "Sin detalle"),
-        )
-        enviar_whatsapp(NUMERO_ASESOR, aviso, phone_number_id)
-        # Marcar que el admin tomará control de esta conversación
-        marcar_conversacion_admin_activa(numero_usuario)
-        logger.info("🔄 Conversación pausada automáticamente tras traspaso para %s", numero_usuario)
 
-    enviado = enviar_whatsapp(numero_usuario, resultado.texto, phone_number_id)
-    if enviado:
-        logger.info("🤖 Respuesta enviada a %s: %s", numero_usuario, resultado.texto[:80])
+def _reprogramar_procesamiento_sintetizado(
+    numero_usuario: str,
+    nombre_usuario: str,
+    phone_number_id: Optional[str],
+) -> None:
+    """
+    Cancela el timer anterior (si existe) y programa uno nuevo.
+    Así se agrupan los mensajes llegados dentro de la ventana de tiempo.
+    """
+    global _mensaje_timers
+    
+    # Cancelar timer anterior si existe
+    if numero_usuario in _mensaje_timers:
+        _mensaje_timers[numero_usuario].cancel()
+        logger.info("⏱️ Timer anterior cancelado para %s (nuevo mensaje llegó)", numero_usuario)
+    
+    # Programar nuevo timer
+    timer = threading.Timer(
+        _VENTANA_AGRUPACION,
+        _procesar_mensajes_agrupados,
+        args=(numero_usuario, nombre_usuario, phone_number_id)
+    )
+    _mensaje_timers[numero_usuario] = timer
+    timer.daemon = True
+    timer.start()
+    logger.info("⏱️ Timer iniciado para %s (%ds) — esperando más mensajes...", numero_usuario, _VENTANA_AGRUPACION)
 
-    guardar_mensaje(numero_usuario, "user", texto_usuario)
-    guardar_mensaje(numero_usuario, "assistant", resultado.texto)
-    limpiar_historial_antiguo(numero_usuario)
+
+def _procesar_mensajes_agrupados(
+    numero_usuario: str,
+    nombre_usuario: str,
+    phone_number_id: Optional[str],
+) -> None:
+    """
+    Obtiene todos los mensajes sin procesar del usuario, los sintetiza
+    en uno solo y genera una única respuesta.
+    """
+    try:
+        # Obtener todos los mensajes en la ventana
+        mensajes_buffer = obtener_mensajes_sin_procesar(numero_usuario, ventana_segundos=_VENTANA_AGRUPACION)
+        
+        if not mensajes_buffer:
+            logger.info("ℹ️ Sin mensajes para procesar de %s", numero_usuario)
+            return
+        
+        # Sintetizar los mensajes en uno solo
+        if len(mensajes_buffer) == 1:
+            texto_sintetizado = mensajes_buffer[0]
+            logger.info("📬 1 mensaje de %s: %s", numero_usuario, texto_sintetizado[:80])
+        else:
+            # Agrupar los mensajes como un solo contexto
+            texto_sintetizado = " ".join(mensajes_buffer)
+            logger.info(
+                "📬 %d mensajes agrupados de %s → sintetizado a: %s",
+                len(mensajes_buffer),
+                numero_usuario,
+                texto_sintetizado[:100]
+            )
+        
+        # Procesar con IA
+        historial = obtener_historial(numero_usuario)
+        resultado = procesar_mensaje(historial, texto_sintetizado, "")
+        
+        # Manejar traspaso
+        if resultado.hay_traspaso:
+            etiqueta = _ETIQUETAS_TRASPASO_LABELS.get(
+                resultado.tipo_traspaso or "", "TRASPASO"
+            )
+            aviso = armar_notificacion_traspaso(
+                etiqueta=etiqueta,
+                nombre_usuario=nombre_usuario,
+                numero_usuario=numero_usuario,
+                programa=resultado.datos_traspaso.get("programa", "N/A"),
+                resumen=resultado.datos_traspaso.get("resumen", "Sin detalle"),
+            )
+            enviar_whatsapp(NUMERO_ASESOR, aviso, phone_number_id)
+            marcar_conversacion_admin_activa(numero_usuario)
+            logger.info("🔄 Conversación pausada tras traspaso para %s", numero_usuario)
+        
+        # Enviar respuesta
+        enviado = enviar_whatsapp(numero_usuario, resultado.texto, phone_number_id)
+        if enviado:
+            logger.info("🤖 Respuesta enviada a %s: %s", numero_usuario, resultado.texto[:80])
+        
+        # Guardar en historial (todos los mensajes como uno + respuesta)
+        guardar_mensaje(numero_usuario, "user", texto_sintetizado)
+        guardar_mensaje(numero_usuario, "assistant", resultado.texto)
+        limpiar_historial_antiguo(numero_usuario)
+        
+        # Limpiar buffer
+        limpiar_mensajes_sin_procesar(numero_usuario)
+        
+    except Exception as exc:
+        logger.exception("Error procesando mensajes agrupados de %s: %s", numero_usuario, exc)
+    finally:
+        # Limpiar el timer del diccionario
+        global _mensaje_timers
+        if numero_usuario in _mensaje_timers:
+            del _mensaje_timers[numero_usuario]
 
 
 if __name__ == "__main__":
