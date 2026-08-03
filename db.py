@@ -97,6 +97,13 @@ _CREATE_TABLE_PG = """
         numero TEXT PRIMARY KEY,
         creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS conversaciones_admin (
+        numero TEXT PRIMARY KEY,
+        activa BOOLEAN NOT NULL DEFAULT TRUE,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 """
 
 _CREATE_TABLE_SQLITE = """
@@ -117,6 +124,13 @@ _CREATE_TABLE_SQLITE = """
     CREATE TABLE IF NOT EXISTS usuarios_notificados_no_texto (
         numero TEXT PRIMARY KEY,
         creado_en TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversaciones_admin (
+        numero TEXT PRIMARY KEY,
+        activa INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
     );
 """
 
@@ -198,6 +212,67 @@ def registrar_notificacion_no_texto(numero: str) -> None:
         sql = "INSERT OR IGNORE INTO usuarios_notificados_no_texto (numero, creado_en) VALUES (?, ?)"
     with _connection() as conn:
         conn.cursor().execute(sql, (numero, ahora))
+
+
+def conversacion_en_manos_admin(numero: str) -> bool:
+    """Retorna True si la conversación está siendo manejada activamente por un admin."""
+    if not numero:
+        return False
+    sql = "SELECT 1 FROM conversaciones_admin WHERE numero = %s AND activa = %s"
+    if not _USE_POSTGRES:
+        sql = "SELECT 1 FROM conversaciones_admin WHERE numero = ? AND activa = 1"
+        with _connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, (numero,))
+    else:
+        with _connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, (numero, True))
+    
+    row = cur.fetchone()
+    return row is not None
+
+
+def marcar_conversacion_admin_activa(numero: str) -> None:
+    """Marca que un admin está manejando esta conversación."""
+    if not numero:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    if _USE_POSTGRES:
+        sql = """
+            INSERT INTO conversaciones_admin (numero, activa, creado_en, actualizado_en)
+            VALUES (%s, TRUE, %s, %s)
+            ON CONFLICT (numero) DO UPDATE
+            SET activa = TRUE, actualizado_en = %s
+        """
+        with _connection() as conn:
+            conn.cursor().execute(sql, (numero, ahora, ahora, ahora))
+    else:
+        sql = """
+            INSERT OR REPLACE INTO conversaciones_admin (numero, activa, creado_en, actualizado_en)
+            VALUES (?, 1, ?, ?)
+        """
+        with _connection() as conn:
+            conn.cursor().execute(sql, (numero, ahora, ahora))
+
+
+def marcar_conversacion_admin_inactiva(numero: str) -> None:
+    """Marca que el admin liberó esta conversación (puede volver a procesar con IA)."""
+    if not numero:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    if _USE_POSTGRES:
+        sql = """
+            UPDATE conversaciones_admin
+            SET activa = FALSE, actualizado_en = %s
+            WHERE numero = %s
+        """
+        with _connection() as conn:
+            conn.cursor().execute(sql, (ahora, numero))
+    else:
+        sql = "UPDATE conversaciones_admin SET activa = 0, actualizado_en = ? WHERE numero = ?"
+        with _connection() as conn:
+            conn.cursor().execute(sql, (ahora, numero))
 
 
 def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:
