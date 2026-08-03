@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Generator, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,14 @@ _CREATE_TABLE_PG = """
         creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS mensajes_sin_procesar (
+        id SERIAL PRIMARY KEY,
+        numero TEXT NOT NULL,
+        contenido TEXT NOT NULL,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_mensajes_sin_procesar_numero ON mensajes_sin_procesar(numero);
 """
 
 _CREATE_TABLE_SQLITE = """
@@ -132,6 +140,14 @@ _CREATE_TABLE_SQLITE = """
         creado_en TEXT NOT NULL,
         actualizado_en TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS mensajes_sin_procesar (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero TEXT NOT NULL,
+        contenido TEXT NOT NULL,
+        creado_en TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mensajes_sin_procesar_numero ON mensajes_sin_procesar(numero);
 """
 
 
@@ -273,6 +289,60 @@ def marcar_conversacion_admin_inactiva(numero: str) -> None:
         sql = "UPDATE conversaciones_admin SET activa = 0, actualizado_en = ? WHERE numero = ?"
         with _connection() as conn:
             conn.cursor().execute(sql, (ahora, numero))
+
+
+def agregar_mensaje_sin_procesar(numero: str, contenido: str) -> None:
+    """Agrega un mensaje a la cola de mensajes pendientes (sin procesar aún)."""
+    if not numero or not contenido:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    sql = "INSERT INTO mensajes_sin_procesar (numero, contenido, creado_en) VALUES (%s, %s, %s)"
+    if not _USE_POSTGRES:
+        sql = sql.replace("%s", "?")
+    with _connection() as conn:
+        conn.cursor().execute(sql, (numero, contenido, ahora))
+
+
+def obtener_mensajes_sin_procesar(numero: str, ventana_segundos: int = 10) -> List[str]:
+    """
+    Obtiene todos los mensajes sin procesar del usuario en los últimos N segundos.
+    Esto permite agrupar mensajes enviados rápidamente como un solo tema.
+    """
+    if not numero:
+        return []
+    
+    if _USE_POSTGRES:
+        sql = """
+            SELECT contenido FROM mensajes_sin_procesar
+            WHERE numero = %s AND creado_en > NOW() - INTERVAL '%s seconds'
+            ORDER BY creado_en ASC
+        """
+        with _connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, (numero, ventana_segundos))
+    else:
+        sql = """
+            SELECT contenido FROM mensajes_sin_procesar
+            WHERE numero = ? AND creado_en > datetime('now', '-%d seconds')
+            ORDER BY creado_en ASC
+        """.replace("%d", str(ventana_segundos))
+        with _connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, (numero,))
+    
+    filas = cur.fetchall()
+    return [fila[0] for fila in filas]
+
+
+def limpiar_mensajes_sin_procesar(numero: str) -> None:
+    """Elimina todos los mensajes sin procesar de un usuario."""
+    if not numero:
+        return
+    sql = "DELETE FROM mensajes_sin_procesar WHERE numero = %s"
+    if not _USE_POSTGRES:
+        sql = sql.replace("%s", "?")
+    with _connection() as conn:
+        conn.cursor().execute(sql, (numero,))
 
 
 def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:
