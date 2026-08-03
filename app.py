@@ -25,15 +25,20 @@ from db import (
     limpiar_historial_antiguo,
     es_wamid_procesado,
     registrar_wamid,
+    ya_se_notifico_no_texto,
+    registrar_notificacion_no_texto,
+    conversacion_en_manos_admin,
+    marcar_conversacion_admin_activa,
+    marcar_conversacion_admin_inactiva,
 )
 from ai_client import procesar_mensaje
 from meta_client import validar_firma_meta, enviar_whatsapp, armar_notificacion_traspaso
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging ─────────────────────────────────────────────────────────────[...]
 config.configurar_logging()
 logger = logging.getLogger(__name__)
 
-# ── Flask App ─────────────────────────────────────────────────────────────────
+# ── Flask App ────────────────────────────────────────────────────────────[...]
 app = Flask(__name__)
 
 # Inicializar DB al arrancar (idempotente)
@@ -45,7 +50,7 @@ _MENSAJE_NO_TEXTO = (
 )
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────[...]
 
 @app.route("/", methods=["GET"])
 def health_check():
@@ -92,7 +97,29 @@ def recibir_mensaje():
     return jsonify({"status": "ok"}), 200
 
 
-# ── Business Logic ────────────────────────────────────────────────────────────
+@app.route("/admin/pausar/<numero>", methods=["POST"])
+def pausar_ia(numero: str):
+    """
+    Endpoint para que el admin active el modo de control manual.
+    Uso: POST /admin/pausar/34612345678
+    """
+    marcar_conversacion_admin_activa(numero)
+    logger.info("🛑 IA pausada para conversación con %s — admin tomó el control", numero)
+    return jsonify({"status": "ok", "mensaje": f"Conversación {numero} bajo control manual"}), 200
+
+
+@app.route("/admin/reanudar/<numero>", methods=["POST"])
+def reanudar_ia(numero: str):
+    """
+    Endpoint para que el admin libere el control manual.
+    Uso: POST /admin/reanudar/34612345678
+    """
+    marcar_conversacion_admin_inactiva(numero)
+    logger.info("▶️ IA reanudada para conversación con %s — admin liberó el control", numero)
+    return jsonify({"status": "ok", "mensaje": f"Conversación {numero} vuelve a automático"}), 200
+
+
+# ── Business Logic ──────────────────────────────────────────────────────────[...]
 
 def _procesar_payload(data: dict) -> None:
     """Itera sobre el payload de Meta y procesa cada mensaje aisladamente."""
@@ -132,7 +159,15 @@ def _procesar_mensaje_individual(
     if wamid:
         registrar_wamid(wamid)
 
-    # 2. Manejo de tipos de mensaje
+    # 2. Verificar si la conversación está siendo manejada por un admin
+    if conversacion_en_manos_admin(numero_usuario):
+        logger.info("⏸️ Conversación pausada (admin en control): mensaje de %s ignorado", numero_usuario)
+        # No procesar con IA, guardar el mensaje como historial pero no responder
+        texto_guardado = message.get("text", {}).get("body") if message.get("type") == "text" else "[mensaje no-texto]"
+        guardar_mensaje(numero_usuario, "user", texto_guardado)
+        return
+
+    # 3. Manejo de tipos de mensaje
     msg_type = message.get("type")
     texto_usuario: Optional[str] = None
 
@@ -140,7 +175,13 @@ def _procesar_mensaje_individual(
         texto_usuario = message.get("text", {}).get("body")
     elif msg_type in ("audio", "image", "document", "video", "sticker", "voice", "location"):
         logger.info("📎 Mensaje no-texto recibido (%s) de %s", msg_type, numero_usuario)
-        enviar_whatsapp(numero_usuario, _MENSAJE_NO_TEXTO, phone_number_id)
+        # Enviar notificación SOLO SI NO SE HA ENVIADO ANTES
+        if not ya_se_notifico_no_texto(numero_usuario):
+            enviar_whatsapp(numero_usuario, _MENSAJE_NO_TEXTO, phone_number_id)
+            registrar_notificacion_no_texto(numero_usuario)
+            logger.info("✉️ Notificación no-texto enviada a %s (primera vez)", numero_usuario)
+        else:
+            logger.info("⏭️ Notificación no-texto ya fue enviada a %s — ignorando mensaje", numero_usuario)
         return
 
     ad_context = ""
@@ -176,6 +217,9 @@ def _procesar_mensaje_individual(
             resumen=resultado.datos_traspaso.get("resumen", "Sin detalle"),
         )
         enviar_whatsapp(NUMERO_ASESOR, aviso, phone_number_id)
+        # Marcar que el admin tomará control de esta conversación
+        marcar_conversacion_admin_activa(numero_usuario)
+        logger.info("🔄 Conversación pausada automáticamente tras traspaso para %s", numero_usuario)
 
     enviado = enviar_whatsapp(numero_usuario, resultado.texto, phone_number_id)
     if enviado:
