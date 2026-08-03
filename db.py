@@ -92,6 +92,11 @@ _CREATE_TABLE_PG = """
         wamid TEXT PRIMARY KEY,
         creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS usuarios_notificados_no_texto (
+        numero TEXT PRIMARY KEY,
+        creado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 """
 
 _CREATE_TABLE_SQLITE = """
@@ -106,6 +111,11 @@ _CREATE_TABLE_SQLITE = """
 
     CREATE TABLE IF NOT EXISTS wamids_procesados (
         wamid TEXT PRIMARY KEY,
+        creado_en TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS usuarios_notificados_no_texto (
+        numero TEXT PRIMARY KEY,
         creado_en TEXT NOT NULL
     );
 """
@@ -163,6 +173,31 @@ def registrar_wamid(wamid: str) -> None:
     with _connection() as conn:
         conn.cursor().execute(sql, (wamid, ahora))
 
+
+def ya_se_notifico_no_texto(numero: str) -> bool:
+    """Retorna True si ya se envió el mensaje 'no puedo procesar' a este usuario."""
+    if not numero:
+        return False
+    sql = "SELECT 1 FROM usuarios_notificados_no_texto WHERE numero = %s"
+    if not _USE_POSTGRES:
+        sql = sql.replace("%s", "?")
+    with _connection() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (numero,))
+        row = cur.fetchone()
+        return row is not None
+
+
+def registrar_notificacion_no_texto(numero: str) -> None:
+    """Registra que ya se notificó al usuario sobre mensajes no-texto."""
+    if not numero:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    sql = "INSERT INTO usuarios_notificados_no_texto (numero, creado_en) VALUES (%s, %s) ON CONFLICT DO NOTHING"
+    if not _USE_POSTGRES:
+        sql = "INSERT OR IGNORE INTO usuarios_notificados_no_texto (numero, creado_en) VALUES (?, ?)"
+    with _connection() as conn:
+        conn.cursor().execute(sql, (numero, ahora))
 
 
 def guardar_mensaje(numero: str, rol: str, contenido: str) -> None:
